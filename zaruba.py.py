@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 # --- Pydantic models for request data validation ---
+# Модели для проверки данных, приходящих с фронтенда. Это как паспортный контроль.
 class SessionRegistration(BaseModel):
     participant1: str
     participant2: str
@@ -24,11 +25,11 @@ class EndSession(BaseModel):
 app = FastAPI()
 
 # --- In-memory data storage ---
-# In a real application, this would be a database (e.g., PostgreSQL + Redis)
-# Key: session_id (participant2's name), Value: session data
+# В реальном приложении здесь была бы база данных (PostgreSQL + Redis)
+# Ключ: session_id (имя Участника 2), Значение: данные сессии
 active_sessions: Dict[str, Dict] = {}
 
-# The list of products, used across the application
+# Список продуктов, который будет использоваться везде
 PRODUCT_LIST = [
     "ДК", "КК", "Комбо/Кросс КК", "ЦП", "Гос.Уведомления", "Смарт",
     "Кешбек", "ЖКУ", "БС", "БС со Стратегией", "Инвесткопилка",
@@ -37,9 +38,10 @@ PRODUCT_LIST = [
 ]
 
 # --- WebSocket Connection Manager ---
+# Класс-помощник для управления "живыми" подключениями
 class ConnectionManager:
     def __init__(self):
-        # Stores active connections for each session
+        # Хранит активные подключения для каждой сессии
         self.active_connections: Dict[str, List[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, session_id: str):
@@ -51,8 +53,6 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket, session_id: str):
         if session_id in self.active_connections:
             self.active_connections[session_id].remove(websocket)
-            # If no connections are left, we can consider cleaning up the session
-            # For now, we'll let sessions expire or be manually ended
 
     async def broadcast(self, message: str, session_id: str):
         if session_id in self.active_connections:
@@ -62,9 +62,10 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 # --- Background task to clean up old sessions ---
+# Фоновая задача, которая раз в час проверяет и удаляет старые сессии (старше 15 часов)
 async def cleanup_old_sessions():
     while True:
-        await asyncio.sleep(3600)  # Check every hour
+        await asyncio.sleep(3600)  # Проверять каждый час
         now = datetime.utcnow()
         sessions_to_delete = []
         for session_id, data in active_sessions.items():
@@ -80,13 +81,13 @@ async def cleanup_old_sessions():
 
 @app.on_event("startup")
 async def startup_event():
-    # Start the background task when the server starts
+    # Запускаем фоновую задачу при старте сервера
     asyncio.create_task(cleanup_old_sessions())
 
 
-# --- HTTP Endpoints ---
+# --- HTTP Endpoints (API routes) ---
 
-# 1. Serve Frontend Files
+# 1. Отдаем файлы фронтенда (HTML, CSS, JS)
 @app.get("/")
 async def get_page():
     with open("index.html", "r", encoding="utf-8") as f:
@@ -95,21 +96,19 @@ async def get_page():
 @app.get("/style.css")
 async def get_styles():
     with open("style.css", "r", encoding="utf-8") as f:
-        # Return with the correct media type for CSS
         return HTMLResponse(content=f.read(), media_type="text/css")
 
 @app.get("/script.js")
 async def get_scripts():
     with open("script.js", "r", encoding="utf-8") as f:
-        # Return with the correct media type for JavaScript
         return HTMLResponse(content=f.read(), media_type="application/javascript")
 
-# 2. Register a new session ("Заруба")
+# 2. Регистрация новой сессии ("Зарубы")
 @app.post("/register")
 async def register_session(registration_data: SessionRegistration):
     p1 = registration_data.participant1.strip()
     p2 = registration_data.participant2.strip()
-    session_id = p2  # The session is identified by participant 2's name
+    session_id = p2  # Сессия идентифицируется по имени Участника 2
 
     if not p1 or not p2:
         return JSONResponse(status_code=400, content={"message": "Имена участников не могут быть пустыми."})
@@ -118,7 +117,7 @@ async def register_session(registration_data: SessionRegistration):
     if session_id in active_sessions:
         return JSONResponse(status_code=409, content={"message": f"Сессия для участника '{p2}' уже существует. Попросите его завершить старую сессию или выберите другое имя."})
 
-    # Create a new session
+    # Создаем новую сессию
     active_sessions[session_id] = {
         "participant1": p1,
         "participant2": p2,
@@ -131,7 +130,7 @@ async def register_session(registration_data: SessionRegistration):
     print(f"New session created: {session_id}")
     return JSONResponse(status_code=201, content={"message": "Сессия создана!", "session_id": session_id, "user_name": p1})
 
-# 3. Login for the second participant
+# 3. Вход для второго участника
 @app.post("/login")
 async def login_user(login_data: UserLogin):
     login = login_data.login.strip()
@@ -142,15 +141,15 @@ async def login_user(login_data: UserLogin):
     
     return JSONResponse(status_code=200, content={"message": "Вход выполнен!", "session_id": session_id, "user_name": login})
 
-# 4. End a session
+# 4. Завершение сессии
 @app.post("/end_session")
 async def end_session(session_data: EndSession):
     session_id = session_data.session_id
     if session_id in active_sessions:
-        # Notify clients that the session is ending
+        # Уведомляем всех клиентов в сессии, что она завершается
         await manager.broadcast(json.dumps({"type": "session_ended"}), session_id)
         
-        # Clean up
+        # Удаляем данные
         del active_sessions[session_id]
         if session_id in manager.active_connections:
             del manager.active_connections[session_id]
@@ -162,6 +161,7 @@ async def end_session(session_data: EndSession):
 
 
 # --- WebSocket Endpoint for real-time communication ---
+# "Живое" соединение для обмена данными в реальном времени
 @app.websocket("/ws/{session_id}/{user_name}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str, user_name: str):
     if session_id not in active_sessions:
@@ -171,7 +171,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, user_name: s
     await manager.connect(websocket, session_id)
     
     try:
-        # Send initial data to the newly connected client
+        # Отправляем начальные данные новому клиенту
         initial_data = {
             "type": "state_update",
-            "data": active_sessions[session_id
+            "data": active_sessions[session
