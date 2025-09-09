@@ -1,10 +1,11 @@
 # main.py
 import asyncio
 import json
+import uvicorn
 from datetime import datetime, timedelta
 from typing import Dict, List
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -68,8 +69,8 @@ async def cleanup_old_sessions():
         await asyncio.sleep(3600)  # Проверять каждый час
         now = datetime.utcnow()
         sessions_to_delete = []
-        for session_id, data in active_sessions.items():
-            if now - data["created_at"] > timedelta(hours=15):
+        for session_id, data in list(active_sessions.items()):
+            if now - data.get("created_at", now) > timedelta(hours=15):
                 sessions_to_delete.append(session_id)
         
         for session_id in sessions_to_delete:
@@ -174,4 +175,35 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, user_name: s
         # Отправляем начальные данные новому клиенту
         initial_data = {
             "type": "state_update",
-            "data": active_sessions[session
+            "data": active_sessions[session_id]
+        }
+        await websocket.send_text(json.dumps(initial_data))
+
+        # Слушаем сообщения от клиента
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+
+            # Если пришло обновление счета
+            if message.get("type") == "update_score" and session_id in active_sessions:
+                payload = message.get("payload", {})
+                # Обновляем счет на сервере
+                active_sessions[session_id]["scores"][user_name] = payload
+                
+                # Готовим и рассылаем обновленные данные всем участникам сессии
+                update_message = {
+                    "type": "state_update",
+                    "data": active_sessions[session_id]
+                }
+                await manager.broadcast(json.dumps(update_message), session_id)
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, session_id)
+        print(f"User {user_name} disconnected from session {session_id}")
+    except Exception as e:
+        print(f"An error occurred in WebSocket for {user_name} in {session_id}: {e}")
+        manager.disconnect(websocket, session_id)
+
+
+# --- Main execution block ---
+# Эта часть запускает наш сервер
